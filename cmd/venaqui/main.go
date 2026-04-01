@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -24,13 +25,26 @@ var (
 	date    = "unknown"
 )
 
+var inputFile string
+
 var rootCmd = &cobra.Command{
 	Use:   "venaqui [link] [location]",
 	Short: "Download files via Real-Debrid and aria2",
 	Long: `Venaqui is a command-line tool with a Terminal User Interface (TUI) that
-leverages Real-Debrid premium links and aria2 for high-speed downloads.`,
-	Args: cobra.MinimumNArgs(1),
-	Run:  run,
+leverages Real-Debrid premium links and aria2 for high-speed downloads.
+
+Use -i to provide a text file containing multiple links (one per line).
+Each link is downloaded sequentially.`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if inputFile != "" {
+			return nil
+		}
+		if len(args) < 1 {
+			return fmt.Errorf("requires a link argument or -i flag with a file path")
+		}
+		return nil
+	},
+	Run: run,
 }
 
 var versionCmd = &cobra.Command{
@@ -44,6 +58,7 @@ var versionCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.Flags().StringVarP(&inputFile, "input", "i", "", "path to a text file containing links (one per line)")
 	rootCmd.AddCommand(versionCmd)
 }
 
@@ -52,6 +67,32 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// parseBatchFile reads a text file and returns non-empty, non-comment lines.
+func parseBatchFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open batch file: %w", err)
+	}
+	defer f.Close()
+
+	var links []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		links = append(links, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read batch file: %w", err)
+	}
+	if len(links) == 0 {
+		return nil, fmt.Errorf("batch file contains no links")
+	}
+	return links, nil
 }
 
 func run(cmd *cobra.Command, args []string) {
@@ -64,16 +105,11 @@ func run(cmd *cobra.Command, args []string) {
 	}
 
 	// Parse arguments
-	link := args[0]
 	downloadDir := cfg.DefaultDownloadDir
 	if len(args) > 1 {
 		downloadDir = args[1]
-	}
-
-	// Validate URL
-	if err := utils.ValidateURL(link); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid URL: %v\n", err)
-		os.Exit(1)
+	} else if inputFile != "" && len(args) > 0 {
+		downloadDir = args[0]
 	}
 
 	// Normalize and validate download directory
@@ -96,13 +132,54 @@ func run(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Determine links to process
+	var links []string
+	if inputFile != "" {
+		links, err = parseBatchFile(inputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Batch file loaded: %d link(s) to download\n\n", len(links))
+	} else {
+		links = []string{args[0]}
+	}
+
+	// Process each link sequentially
+	for i, link := range links {
+		if len(links) > 1 {
+			fmt.Printf("━━━ [%d/%d] %s ━━━\n", i+1, len(links), link)
+		}
+
+		if err := processLink(cfg, link, downloadDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if i < len(links)-1 {
+				fmt.Println("Skipping to next link...")
+				continue
+			}
+			os.Exit(1)
+		}
+
+		if len(links) > 1 && i < len(links)-1 {
+			fmt.Println()
+		}
+	}
+}
+
+// processLink handles the full download lifecycle for a single link:
+// validate → unrestrict via Real-Debrid → download via aria2 → show TUI.
+func processLink(cfg *config.Config, link, downloadDir string) error {
+	// Validate URL
+	if err := utils.ValidateURL(link); err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
 	// Initialize Real-Debrid client
 	rdClient := realdebrid.NewClient(cfg.RealDebridAPIToken)
 
-	// Validate token (optional check)
+	// Validate token
 	if err := rdClient.ValidateToken(); err != nil {
-		fmt.Fprintf(os.Stderr, "Real-Debrid API token validation failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("Real-Debrid API token validation failed: %w", err)
 	}
 
 	var unrestrictedLink *realdebrid.UnrestrictedLink
@@ -122,15 +199,13 @@ func run(cmd *cobra.Command, args []string) {
 		}
 
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "RD API error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("RD API error: %w", err)
 		}
 
 		// Check if files need to be selected
 		torrentInfo, err := rdClient.GetTorrentInfo(torrentResp.ID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "RD API error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("RD API error: %w", err)
 		}
 
 		// Select all files if needed
@@ -142,8 +217,7 @@ func run(cmd *cobra.Command, args []string) {
 			if len(fileIDs) > 0 {
 				fmt.Println("Selecting files...")
 				if err := rdClient.SelectFiles(torrentResp.ID, fileIDs); err != nil {
-					fmt.Fprintf(os.Stderr, "RD API error: %v\n", err)
-					os.Exit(1)
+					return fmt.Errorf("RD API error: %w", err)
 				}
 			}
 		}
@@ -151,46 +225,33 @@ func run(cmd *cobra.Command, args []string) {
 		fmt.Println("Waiting for torrent to be processed...")
 		torrentInfo, err = rdClient.WaitForTorrentReady(torrentResp.ID, 5*time.Minute)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "RD API error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("RD API error: %w", err)
 		}
 
 		if len(torrentInfo.Links) == 0 {
-			fmt.Fprintf(os.Stderr, "No download links available from torrent\n")
-			os.Exit(1)
+			return fmt.Errorf("no download links available from torrent")
 		}
 
 		// Get the first link and validate it
 		downloadLink := torrentInfo.Links[0]
 		if downloadLink == "" {
-			fmt.Fprintf(os.Stderr, "Download link is empty\n")
-			os.Exit(1)
+			return fmt.Errorf("download link is empty")
 		}
 
-		// Links from /torrents/info/{id} can be:
-		// 1. Real-Debrid download page links (real-debrid.com/d/...) - need unrestricting to get direct link
-		// 2. Direct download links (rdeb.io/...) - already direct, use as-is
-		// 3. Hoster links - need unrestricting
-		
 		// Check if it's already a direct download link (rdeb.io)
 		if strings.Contains(downloadLink, "rdeb.io") {
-			// Already a direct download link - use it directly
 			unrestrictedLink = &realdebrid.UnrestrictedLink{
 				Link:     downloadLink,
 				Filename: torrentInfo.Filename,
 			}
 			filename = torrentInfo.Filename
 		} else {
-			// Real-Debrid download page link (real-debrid.com/d/...) or hoster link
-			// Both need to be unrestricted to get the direct download link
 			fmt.Println("Unrestricting torrent download link...")
+			var err error
 			unrestrictedLink, err = rdClient.UnrestrictLink(downloadLink)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "RD API error: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Link: %s\n", downloadLink)
-				os.Exit(1)
+				return fmt.Errorf("RD API error (link: %s): %w", downloadLink, err)
 			}
-			// Use filename from torrent info, fallback to unrestricted link filename
 			filename = torrentInfo.Filename
 			if filename == "" {
 				filename = unrestrictedLink.Filename
@@ -202,8 +263,7 @@ func run(cmd *cobra.Command, args []string) {
 		var err error
 		unrestrictedLink, err = rdClient.UnrestrictLink(link)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "RD API error: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("RD API error: %w", err)
 		}
 		filename = unrestrictedLink.Filename
 	}
@@ -211,31 +271,25 @@ func run(cmd *cobra.Command, args []string) {
 	// Initialize aria2 client
 	aria2Client, err := aria2.NewClient(cfg.Aria2RPCUrl, cfg.Aria2Secret)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aria2 connection error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("aria2 connection error: %w", err)
 	}
 	defer aria2Client.Close()
 
 	// Add download to aria2
-	// Use the 'download' field from the API response, which contains the direct download link
-	// The 'link' field contains the original link, not the download link
 	downloadURL := unrestrictedLink.Download
 	if downloadURL == "" {
-		// Fallback to Link if Download is not available (for backwards compatibility)
 		downloadURL = unrestrictedLink.Link
 	}
 	fmt.Println("Starting download...")
 	gid, err := aria2Client.AddDownload(downloadURL, downloadDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Download error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("download error: %w", err)
 	}
 
 	// Start TUI
 	if filename == "" {
 		filename = unrestrictedLink.Filename
 		if filename == "" {
-			// Use download URL for filename extraction if available
 			urlForFilename := downloadURL
 			if urlForFilename == "" {
 				urlForFilename = unrestrictedLink.Link
@@ -248,9 +302,10 @@ func run(cmd *cobra.Command, args []string) {
 	p := tea.NewProgram(model)
 
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("TUI error: %w", err)
 	}
+
+	return nil
 }
 
 // ensureAria2Running checks if aria2 is running and starts it if needed
