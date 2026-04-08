@@ -82,6 +82,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Track completion time
 		if m.status != nil && m.status.IsComplete() && m.completionTime.IsZero() {
 			m.completionTime = time.Now()
+			if m.continuous {
+				return m, autoAdvanceCmd()
+			}
 		}
 
 		// Don't auto-quit on completion - let user press 'o' or 'q'
@@ -97,6 +100,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, nil
+
+	case autoAdvanceMsg:
+		m.quitting = true
+		return m, tea.Quit
 
 	case errMsg:
 		m.err = msg

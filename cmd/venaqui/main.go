@@ -26,6 +26,7 @@ var (
 )
 
 var inputFile string
+var continuous bool
 
 var rootCmd = &cobra.Command{
 	Use:   "venaqui [link] [location]",
@@ -59,6 +60,7 @@ var versionCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().StringVarP(&inputFile, "input", "i", "", "path to a text file containing links (one per line)")
+	rootCmd.Flags().BoolVarP(&continuous, "continuous", "c", false, "auto-advance to next download on completion")
 	rootCmd.AddCommand(versionCmd)
 }
 
@@ -151,7 +153,7 @@ func run(cmd *cobra.Command, args []string) {
 			fmt.Printf("━━━ [%d/%d] %s ━━━\n", i+1, len(links), link)
 		}
 
-		if err := processLink(cfg, link, downloadDir); err != nil {
+		if err := processLink(cfg, link, downloadDir, continuous); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if i < len(links)-1 {
 				fmt.Println("Skipping to next link...")
@@ -168,7 +170,7 @@ func run(cmd *cobra.Command, args []string) {
 
 // processLink handles the full download lifecycle for a single link:
 // validate → unrestrict via Real-Debrid → download via aria2 → show TUI.
-func processLink(cfg *config.Config, link, downloadDir string) error {
+func processLink(cfg *config.Config, link, downloadDir string, continuous bool) error {
 	// Validate URL
 	if err := utils.ValidateURL(link); err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -298,7 +300,7 @@ func processLink(cfg *config.Config, link, downloadDir string) error {
 		}
 	}
 
-	model := tui.InitialModel(aria2Client, gid, filename)
+	model := tui.InitialModel(aria2Client, gid, filename, continuous)
 	p := tea.NewProgram(model)
 
 	if _, err := p.Run(); err != nil {

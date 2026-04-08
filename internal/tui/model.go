@@ -20,6 +20,7 @@ type Model struct {
 	lastUpdate   time.Time
 	speedHistory []int64 // Speed history for graph (last 50 samples)
 	maxHistory   int
+	continuous   bool // Auto-quit on completion (no user interaction needed)
 }
 
 // tickMsg is sent periodically to update the UI
@@ -31,8 +32,11 @@ type statusMsg *aria2.DownloadStatus
 // errMsg wraps an error
 type errMsg error
 
+// autoAdvanceMsg is sent after a delay to trigger auto-quit in continuous mode
+type autoAdvanceMsg struct{}
+
 // InitialModel creates a new model with initial state
-func InitialModel(aria2Client *aria2.Client, gid, filename string) Model {
+func InitialModel(aria2Client *aria2.Client, gid, filename string, continuous bool) Model {
 	now := time.Now()
 	return Model{
 		aria2Client:  aria2Client,
@@ -42,6 +46,7 @@ func InitialModel(aria2Client *aria2.Client, gid, filename string) Model {
 		lastUpdate:   now,
 		speedHistory: make([]int64, 0),
 		maxHistory:   50,
+		continuous:   continuous,
 	}
 }
 
@@ -57,6 +62,13 @@ func (m Model) Init() tea.Cmd {
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+// autoAdvanceCmd waits a brief period then sends autoAdvanceMsg
+func autoAdvanceCmd() tea.Cmd {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+		return autoAdvanceMsg{}
 	})
 }
 

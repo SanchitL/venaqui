@@ -31,7 +31,6 @@ Thumbs.db
 
 # Build output
 /venaqui
-venaqui
 bin/
 dist/
 

@@ -364,9 +364,17 @@ func (m Model) renderCompletionView() string {
 	s.WriteString("\n\n")
 	
 	// Help text
-	s.WriteString(helpStyle.Render("Press 'o' to open file | 'd' to show in directory | 'q' to quit"))
+	if m.continuous {
+		remaining := 1*time.Second - time.Since(m.completionTime)
+		if remaining < 0 {
+			remaining = 0
+		}
+		s.WriteString(helpStyle.Render(fmt.Sprintf("Auto-advancing in %ds... | Press 'q' to quit", int(remaining.Seconds())+1)))
+	} else {
+		s.WriteString(helpStyle.Render("Press 'o' to open file | 'd' to show in directory | 'q' to quit"))
+	}
 	s.WriteString("\n")
-	
+
 	return s.String()
 }
 
